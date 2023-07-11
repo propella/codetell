@@ -26,12 +26,18 @@ MODEL_SHORT = "gpt-3.5-turbo"
 MODEL_LONG = "gpt-3.5-turbo-16k"
 
 INCLUDES = ["**/*.dart", "**/*.py", "**/*.js", "**/*.ts", "**/*.go", "**/*.rs"]
-EXCLUDES = ["**/node_modules/**", "**/build/**", "**/dist/**", "**/target/**"]
+EXCLUDES = [
+    "**/node_modules/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/target/**",
+    "**/env/**",
+]
 
 Cache = dict[str, Page] | None
 
 
-PROMPT_FUNCTIONAL = """Please write functional specification of the code below with the format in Markdown in Japanese.
+PROMPT_FUNCTIONAL = """Please write functional specification of the code below with the format in Markdown.
 Do not include the source code in your response.
 
 Format:
@@ -50,9 +56,9 @@ Format:
 ```
 """
 
-PROMPT_EXPLAIN = "Please explain what the code below does for novices in Markdown in Japanese. Do not repeat the code."
+PROMPT_EXPLAIN = "Please explain what the code below does to end users in Markdown. Do not repeat the code."
 
-PROMPT_REVIEW = """You are a professional programmer. Write code review for the code below in Japanese following the format.
+PROMPT_REVIEW = """You are a professional programmer. Write code review for the code below following the format.
 
 Format:
 ```
@@ -65,7 +71,7 @@ Format:
 ```
 """
 
-PROMPT_API = "Please write API reference manual in Markdown in Japanese. You must not include the source code in your response."
+PROMPT_API = "Please write API reference manual in Markdown. You must not include the source code in your response."
 
 
 PROMPTS = {
@@ -102,6 +108,68 @@ def find_files(
     return sorted_files
 
 
+def make_summary(
+    dirname: str,
+    name: str,
+    filenames: list[str],
+    lang: str = "English",
+    model: str = MODEL_SHORT,
+) -> str:
+    """Make summary of the project.
+
+    Args:
+        name: The project name
+        filenames: The filenames
+        model: The model to use
+
+    Returns:
+        The summary
+    """
+
+    with open(f"{dirname}/README.md", "r", encoding="utf-8") as file:
+        readme = file.read()
+
+    filelist = "\n".join(f"* {filename}" for filename in filenames)
+
+    prompt = f"""Generate a summary of the project in a few lines from the README.md file and the list of source code. Answer it in {lang}.
+
+README:
+
+{readme}
+
+Files:
+
+{filelist}
+
+"""
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        response = openai.ChatCompletion.create(
+            model=model, messages=messages, temperature=0
+        )
+    except openai.InvalidRequestError as error:
+        # Retry with the long model
+        if model == MODEL_SHORT:
+            return make_summary(dirname, name, filenames, model=MODEL_LONG)
+        else:
+            return error.user_message
+
+    if model == MODEL_SHORT and response["choices"][0]["finish_reason"] == "length":
+        return make_summary(dirname, name, filenames, model=MODEL_LONG)
+
+    summary = response["choices"][0]["message"]["content"]
+    total_tokens = response["usage"]["total_tokens"]
+
+    return f"""# {name} project
+
+{summary}
+
+({total_tokens} tokens)
+
+"""
+
+
 @retry(
     wait=wait_random_exponential(min=1, max=40),
     stop=stop_after_attempt(5),
@@ -111,6 +179,7 @@ def make_description(
     dirname: str,
     filename: str,
     prompt: str = "explain",
+    lang: str = "English",
     model: str = MODEL_SHORT,
     cache: Cache = None,
 ) -> Page:
@@ -136,7 +205,7 @@ def make_description(
 
     prompt_header = PROMPTS[prompt]
 
-    prompt_all = f"""{prompt_header}
+    prompt_all = f"""In {lang}, {prompt_header}.
 
 Filename:
 
@@ -148,6 +217,10 @@ Code:
 {contents}
 ```
 """
+
+    # print("Prompt:")
+    # print(prompt_all)
+
     messages = [{"role": "user", "content": prompt_all}]
     try:
         response = openai.ChatCompletion.create(
@@ -174,33 +247,55 @@ Code:
 
 
 def make_page(
-    dirname: str, filename: str, prompt: str = "explain", cache: Cache = None
+    dirname: str,
+    filename: str,
+    prompt: str = "explain",
+    lang: str = "English",
+    cache: Cache = None,
 ) -> str:
     """Create a page from the file"""
 
-    doc = make_description(dirname, filename, prompt=prompt, cache=cache)
+    doc = make_description(dirname, filename, prompt=prompt, lang=lang, cache=cache)
 
-    return f"""## {filename}
+    return f"""## `{filename}`
 
 {doc.text}
 
-total_tokens: {doc.total_tokens}
+({doc.total_tokens} tokens)
 
 ---
+
 """
 
 
 class CodeTell:
     """Create documentation from source code"""
 
-    def __init__(self, dirname: str, dry_run: bool = False) -> None:
+    def __init__(
+        self, dirname: str, lang: str = "English", dry_run: bool = False
+    ) -> None:
         self.dirname: str = dirname
+        self.name: str = os.path.abspath(dirname).split("/")[-1]
+        self.outfile: str = f"{self.name}.md"
+        self.lang: str = lang
         self.cache: dict[str, Page] = {}
         self.dry_run: bool = dry_run
 
     def sources(self) -> list[str]:
         """List of source files"""
         return find_files(self.dirname)
+
+    def make_summary(self) -> str:
+        """Return a summary of the project generated by AI"""
+        return make_summary(self.dirname, self.name, self.sources(), lang=self.lang)
+
+    def write_summary(self) -> None:
+        """Write the summary of the project generated by AI"""
+        if self.dry_run:
+            return
+        summary = self.make_summary()
+        with open(self.outfile, "w", encoding="utf-8") as file:
+            file.write(summary)
 
     def make_pages(
         self,
@@ -215,21 +310,22 @@ class CodeTell:
             if self.dry_run:
                 page = ""
             else:
-                page = make_page(self.dirname, filename, prompt=prompt, cache=cache)
+                page = make_page(
+                    self.dirname, filename, prompt=prompt, lang=self.lang, cache=cache
+                )
             yield page
 
     def write(
         self,
         title: str,
-        outfile: str,
         prompt: str = "explain",
         up_to: int | None = None,
     ) -> None:
         """Write a page to the file"""
 
         # display(Markdown(f"# {title}"))
-        with open(outfile, "w", encoding="utf-8") as file:
-            file.write(f"# {title}\n")
+        # with open(self.outfile, "w", encoding="utf-8") as file:
+        #    file.write(f"# {title}\n")
 
         for page in self.make_pages(
             prompt=prompt,
@@ -238,7 +334,7 @@ class CodeTell:
         ):
             # display(Markdown(page))
             if not self.dry_run:
-                with open(outfile, "a", encoding="utf-8") as file:
+                with open(self.outfile, "a", encoding="utf-8") as file:
                     file.write(page)
 
 
@@ -255,17 +351,30 @@ def main() -> None:
         action="store_true",
         help="only tell what to do",
     )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="only print summary",
+    )
+    parser.add_argument(
+        "-l",
+        "--lang",
+        default="English",
+        help="specify the language",
+    )
     parser.add_argument("dirname", help="the directory name")
     args = parser.parse_args()
 
     dirname = args.dirname
-    docname = dirname.split("/")[-1]
 
-    docname_md = f"{docname}.md"
-    writer = CodeTell(dirname, dry_run=args.dry_run)
+    writer = CodeTell(dirname, lang=args.lang, dry_run=args.dry_run)
     sources = writer.sources()
     print(f"Source directory: {dirname}")
     print(f"The number of source files: {len(sources)}")
-    print(f"The output file: {docname_md}")
 
-    writer.write(f"{docname} Documentation", docname_md, prompt="explain")
+    if args.summary:
+        print(writer.make_summary())
+    else:
+        print(f"The output file: {writer.outfile}")
+        writer.write_summary()
+        writer.write(f"{writer.name} Documentation", prompt="explain")
