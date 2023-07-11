@@ -1,0 +1,34 @@
+[project]
+name = "codetell"
+version = "0.1.0"
+authors = [{ name = "Takashi Yamamiya", email = "tak@metatoys.org" }]
+description = "An AI-powered tool that enables your code to tell its own story through automatic documentation generation."
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "openai",
+    "tenacity",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "mypy",
+    "pylint",
+    "build",
+    "twine",
+]
+
+[project.scripts]
+codetell = "codetell:main"
+
+[project.urls]
+"Homepage" = "https://github.com/propella/codetell"
+"Bug Tracker" = "https://github.com/propella/codetell/issues"
