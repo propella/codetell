@@ -37,7 +37,7 @@ EXCLUDES = [
 Cache = dict[str, Page] | None
 
 
-PROMPT_FUNCTIONAL = """Please write functional specification of the code below with the format in Markdown.
+PROMPT_FUNCTIONAL = """Please write functional specification of the code below with the format in Markdown in %LANG%.
 Do not include the source code in your response.
 
 Format:
@@ -56,9 +56,9 @@ Format:
 ```
 """
 
-PROMPT_EXPLAIN = "Please explain what the code below does to end users in Markdown. Do not repeat the code."
+PROMPT_EXPLAIN = "Please explain what the code below does to end users in Markdown in %LANG%. Do not repeat the code."
 
-PROMPT_REVIEW = """You are a professional programmer. Write code review for the code below following the format.
+PROMPT_REVIEW = """You are a professional programmer. Write code review for the code below in %LANG% following the format.
 
 Format:
 ```
@@ -71,7 +71,7 @@ Format:
 ```
 """
 
-PROMPT_API = "Please write API reference manual in Markdown. You must not include the source code in your response."
+PROMPT_API = "Please write API reference manual in Markdown in %LANG%. You must not include the source code in your response."
 
 
 PROMPTS = {
@@ -108,17 +108,26 @@ def find_files(
     return sorted_files
 
 
+def get_lang(lang: str | None) -> str:
+    """Determine the language to use."""
+    if lang:
+        return lang
+    if "CODETELL_LANG" in os.environ:
+        return os.environ["CODETELL_LANG"]
+    return "English"
+
+
 def make_summary(
     dirname: str,
-    name: str,
+    title: str,
     filenames: list[str],
-    lang: str = "English",
+    lang: str | None = None,
     model: str = MODEL_SHORT,
 ) -> str:
     """Make summary of the project.
 
     Args:
-        name: The project name
+        title: The title of the summary
         filenames: The filenames
         model: The model to use
 
@@ -131,7 +140,7 @@ def make_summary(
 
     filelist = "\n".join(f"* {filename}" for filename in filenames)
 
-    prompt = f"""Generate a summary of the project in a few lines from the README.md file and the list of source code. Answer it in {lang}.
+    prompt = f"""Generate a summary of the project in a few lines from the README.md file and the list of source code. Answer it in {get_lang(lang)}.
 
 README:
 
@@ -151,17 +160,17 @@ Files:
     except openai.InvalidRequestError as error:
         # Retry with the long model
         if model == MODEL_SHORT:
-            return make_summary(dirname, name, filenames, model=MODEL_LONG)
+            return make_summary(dirname, title, filenames, model=MODEL_LONG)
         else:
             return error.user_message
 
     if model == MODEL_SHORT and response["choices"][0]["finish_reason"] == "length":
-        return make_summary(dirname, name, filenames, model=MODEL_LONG)
+        return make_summary(dirname, title, filenames, model=MODEL_LONG)
 
     summary = response["choices"][0]["message"]["content"]
     total_tokens = response["usage"]["total_tokens"]
 
-    return f"""# {name} project
+    return f"""# {title}
 
 {summary}
 
@@ -173,13 +182,13 @@ Files:
 @retry(
     wait=wait_random_exponential(min=1, max=40),
     stop=stop_after_attempt(5),
-    retry=retry_if_exception_type(openai.APIError),
+    retry=retry_if_exception_type(openai.OpenAIError),
 )
 def make_description(
     dirname: str,
     filename: str,
     prompt: str = "explain",
-    lang: str = "English",
+    lang: str | None = None,
     model: str = MODEL_SHORT,
     cache: Cache = None,
 ) -> Page:
@@ -203,9 +212,9 @@ def make_description(
     with open(fullpath, "r", encoding="utf-8") as file:
         contents = file.read()
 
-    prompt_header = PROMPTS[prompt]
+    prompt_header = PROMPTS[prompt].replace("%LANG%", get_lang(lang))
 
-    prompt_all = f"""In {lang}, {prompt_header}.
+    prompt_all = f"""{prompt_header}.
 
 Filename:
 
@@ -250,7 +259,7 @@ def make_page(
     dirname: str,
     filename: str,
     prompt: str = "explain",
-    lang: str = "English",
+    lang: str | None = None,
     cache: Cache = None,
 ) -> str:
     """Create a page from the file"""
@@ -272,24 +281,38 @@ class CodeTell:
     """Create documentation from source code"""
 
     def __init__(
-        self, dirname: str, lang: str = "English", dry_run: bool = False
+        self,
+        dirname: str,
+        outfile: str | None = None,
+        title: str | None = None,
+        prompt: str = "explain",
+        includes: list[str] = INCLUDES,
+        excludes: list[str] = EXCLUDES,
+        lang: str | None = None,
+        dry_run: bool = False,
     ) -> None:
         self.dirname: str = dirname
         self.name: str = os.path.abspath(dirname).split("/")[-1]
-        self.outfile: str = f"{self.name}.md"
-        self.lang: str = lang
+        self.includes: list[str] = includes
+        self.exclude: list[str] = excludes
+        self.outfile: str = outfile or f"{self.name}.md"
+        self.title: str = title or f"{self.name} Documentation"
+        self.prompt: str = prompt
+        self.lang: str | None = lang
         self.cache: dict[str, Page] = {}
         self.dry_run: bool = dry_run
 
     def sources(self) -> list[str]:
         """List of source files"""
-        return find_files(self.dirname)
+        return find_files(self.dirname, includes=self.includes, excludes=self.exclude)
 
     def make_summary(self) -> str:
         """Return a summary of the project generated by AI"""
-        return make_summary(self.dirname, self.name, self.sources(), lang=self.lang)
+        return make_summary(self.dirname, self.title, self.sources(), lang=self.lang)
 
-    def write_summary(self) -> None:
+    def write_summary(
+        self,
+    ) -> None:
         """Write the summary of the project generated by AI"""
         if self.dry_run:
             return
@@ -299,7 +322,6 @@ class CodeTell:
 
     def make_pages(
         self,
-        prompt: str = "explain",
         up_to: int | None = None,
         cache: Cache = None,
     ) -> Iterator[str]:
@@ -311,24 +333,23 @@ class CodeTell:
                 page = ""
             else:
                 page = make_page(
-                    self.dirname, filename, prompt=prompt, lang=self.lang, cache=cache
+                    self.dirname,
+                    filename,
+                    prompt=self.prompt,
+                    lang=self.lang,
+                    cache=cache,
                 )
             yield page
 
     def write(
         self,
-        title: str,
-        prompt: str = "explain",
         up_to: int | None = None,
     ) -> None:
         """Write a page to the file"""
 
-        # display(Markdown(f"# {title}"))
-        # with open(self.outfile, "w", encoding="utf-8") as file:
-        #    file.write(f"# {title}\n")
+        self.write_summary()
 
         for page in self.make_pages(
-            prompt=prompt,
             up_to=up_to,
             cache=self.cache,
         ):
@@ -360,7 +381,7 @@ def main() -> None:
         "-l",
         "--lang",
         default="English",
-        help="specify the language",
+        help="specify the language, if not, CODETELL_LANG environment variable or English is used",
     )
     parser.add_argument("dirname", help="the directory name")
     args = parser.parse_args()
@@ -376,5 +397,4 @@ def main() -> None:
         print(writer.make_summary())
     else:
         print(f"The output file: {writer.outfile}")
-        writer.write_summary()
-        writer.write(f"{writer.name} Documentation", prompt="explain")
+        writer.write()

@@ -1,6 +1,6 @@
 [project]
 name = "codetell"
-version = "0.1.0"
+version = "0.1.1"
 authors = [{ name = "Takashi Yamamiya", email = "tak@metatoys.org" }]
 description = "An AI-powered tool that enables your code to tell its own story through automatic documentation generation."
 readme = "README.md"
