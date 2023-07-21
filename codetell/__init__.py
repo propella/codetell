@@ -19,6 +19,7 @@ class Page:
 
     text: str
     total_tokens: int
+    source: str
     error: Any = None
 
 
@@ -210,7 +211,7 @@ def make_description(
         return cache[fullpath]
 
     with open(fullpath, "r", encoding="utf-8") as file:
-        contents = file.read()
+        source = file.read()
 
     prompt_header = PROMPTS[prompt].replace("%LANG%", get_lang(lang))
 
@@ -223,7 +224,7 @@ Filename:
 Code:
 
 ```
-{contents}
+{source}
 ```
 """
 
@@ -240,7 +241,7 @@ Code:
         if model == MODEL_SHORT:
             return make_description(dirname, filename, model=MODEL_LONG)
         else:
-            return Page(text=error.user_message, total_tokens=0)
+            return Page(text=error.user_message, total_tokens=0, source="")
 
     if model == MODEL_SHORT and response["choices"][0]["finish_reason"] == "length":
         return make_description(dirname, filename, model=MODEL_LONG)
@@ -249,6 +250,7 @@ Code:
     page = Page(
         text=doc,
         total_tokens=response["usage"]["total_tokens"],
+        source=source,
     )
     if cache is not None:
         cache[fullpath] = page
